@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type {NextFunction, Request, Response} from 'express';
+import type {CookieOptions, NextFunction, Request, Response} from 'express';
 import {getDb} from './db.ts';
 import type {UserRole} from './constants.ts';
 
@@ -32,6 +32,7 @@ export interface SessionUser {
 export interface AuthedRequest extends Request {
   user?: SessionUser | null;
   anonToken?: string;
+  csrfToken?: string;
 }
 
 export function hashPassword(password: string): string {
@@ -92,15 +93,37 @@ export function verifySessionToken(token: string | undefined): SessionPayload | 
   }
 }
 
-export function cookieOptions(req: Request, httpOnly = true) {
-  const isHttps =
-    req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
+export type PreviewCookieOptions = CookieOptions & {partitioned?: boolean};
+
+export function isHttpsRequest(req: Request): boolean {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const originHeader = String(req.headers.origin || '').toLowerCase();
+  return req.secure || forwardedProto === 'https' || originHeader.startsWith('https://');
+}
+
+export function cookieOptions(req: Request, httpOnly = true): PreviewCookieOptions {
+  const isHttps = isHttpsRequest(req);
   return {
     httpOnly,
-    sameSite: 'lax' as const,
+    sameSite: isHttps ? 'none' : 'lax',
     secure: isHttps,
+    ...(isHttps ? {partitioned: true} : {}),
     path: '/',
     maxAge: 1000 * 60 * 60 * 24 * 7,
+  };
+}
+
+export function clearCookieOptions(req: Request, httpOnly = true): PreviewCookieOptions {
+  const isHttps = isHttpsRequest(req);
+  return {
+    httpOnly,
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
+    ...(isHttps ? {partitioned: true} : {}),
+    path: '/',
   };
 }
 
@@ -175,10 +198,12 @@ export function sessionMiddleware(req: AuthedRequest, res: Response, next: NextF
   }
   req.anonToken = anonToken;
 
-  if (!req.cookies?.[CSRF_COOKIE_NAME]) {
-    const csrf = crypto.randomBytes(24).toString('hex');
-    res.cookie(CSRF_COOKIE_NAME, csrf, cookieOptions(req, false));
+  let csrfToken = req.cookies?.[CSRF_COOKIE_NAME] as string | undefined;
+  if (!csrfToken || csrfToken.length < 16) {
+    csrfToken = crypto.randomBytes(24).toString('hex');
+    res.cookie(CSRF_COOKIE_NAME, csrfToken, cookieOptions(req, false));
   }
+  req.csrfToken = csrfToken;
 
   next();
 }

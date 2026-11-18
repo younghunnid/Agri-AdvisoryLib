@@ -8,11 +8,13 @@ import {
 import {getDb} from '../db.ts';
 import {askAgriculturalAdvisor, isAiConfigured} from '../ai.ts';
 import {prototypeRouter} from './prototype.ts';
+import {normalizeLiberianPhone} from '../../src/lib/phone.ts';
 import {
   type AuthedRequest,
   CSRF_COOKIE_NAME,
   SESSION_COOKIE_NAME,
   checkAndRecordRateLimit,
+  clearCookieOptions,
   cookieOptions,
   hashIdentifier,
   hashPassword,
@@ -61,11 +63,15 @@ v1Router.get('/health', (_req, res) => {
   }
 });
 
-v1Router.get('/csrf-token', (req, res) => {
-  const token = req.cookies?.[CSRF_COOKIE_NAME] || crypto.randomBytes(24).toString('hex');
-  if (!req.cookies?.[CSRF_COOKIE_NAME]) {
+v1Router.get('/csrf-token', (req: AuthedRequest, res) => {
+  const token =
+    req.csrfToken ||
+    (req.cookies?.[CSRF_COOKIE_NAME] as string | undefined) ||
+    crypto.randomBytes(24).toString('hex');
+  if (!req.cookies?.[CSRF_COOKIE_NAME] && !req.csrfToken) {
     res.cookie(CSRF_COOKIE_NAME, token, cookieOptions(req, false));
   }
+  res.setHeader('Cache-Control', 'no-store');
   res.json({csrfToken: token});
 });
 
@@ -283,6 +289,19 @@ v1Router.get('/auth/me', (req: AuthedRequest, res) => {
 
 v1Router.post('/auth/register', (req: AuthedRequest, res) => {
   const db = getDb();
+  const regSetting = db
+    .prepare("SELECT value FROM platform_settings WHERE key = 'allow_public_registration'")
+    .get() as {value: string} | undefined;
+  if (regSetting && regSetting.value === 'false') {
+    res.status(403).json({
+      error: {
+        code: 'REGISTRATION_DISABLED',
+        message: 'Public farmer registration is currently disabled by an administrator.',
+      },
+    });
+    return;
+  }
+
   const ipKey = hashIdentifier(req.ip || 'unknown');
   const rl = checkAndRecordRateLimit(ipKey, 'register', 10, 60, true);
   if (!rl.allowed) {
@@ -292,11 +311,13 @@ v1Router.post('/auth/register', (req: AuthedRequest, res) => {
 
   const {displayName, phone, email, password, county, preferredLanguage, cropsOfInterest} = req.body ?? {};
   const cleanName = typeof displayName === 'string' ? displayName.trim() : '';
-  const cleanPhone = typeof phone === 'string' ? normalizePhone(phone) : '';
+  const phoneCheck = normalizeLiberianPhone(typeof phone === 'string' ? phone : '');
+  const cleanPhone = phoneCheck.normalized;
   const cleanEmail = typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
   const cleanPassword = typeof password === 'string' ? password : '';
   const cleanCounty = typeof county === 'string' ? county.trim() : '';
-  const cleanLang = typeof preferredLanguage === 'string' ? preferredLanguage.trim() : 'en';
+  const requestedLang = typeof preferredLanguage === 'string' ? preferredLanguage.trim() : 'en';
+  const cleanLang = SUPPORTED_LANGUAGES.some((l) => l.code === requestedLang) ? requestedLang : 'en';
   const cleanCrops = Array.isArray(cropsOfInterest)
     ? cropsOfInterest.filter((c): c is string => typeof c === 'string').slice(0, 10)
     : [];
@@ -305,8 +326,15 @@ v1Router.post('/auth/register', (req: AuthedRequest, res) => {
     res.status(400).json({error: {code: 'VALIDATION_ERROR', message: 'Name must be 2 to 80 characters.'}});
     return;
   }
-  if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) {
-    res.status(400).json({error: {code: 'VALIDATION_ERROR', message: 'Enter a valid phone number (7–15 digits).'}});
+  if (!phoneCheck.valid) {
+    res.status(400).json({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message:
+          phoneCheck.error ||
+          'Enter a valid Liberian phone number (e.g., 077 012 3456 or +231 77 012 3456).',
+      },
+    });
     return;
   }
   if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
@@ -396,7 +424,12 @@ v1Router.post('/auth/login', (req: AuthedRequest, res) => {
     return;
   }
 
-  const normalized = rawIdent.includes('@') ? rawIdent.toLowerCase() : normalizePhone(rawIdent);
+  const phoneIdent = normalizeLiberianPhone(rawIdent);
+  const normalized = rawIdent.includes('@')
+    ? rawIdent.toLowerCase()
+    : phoneIdent.valid
+      ? phoneIdent.normalized
+      : normalizePhone(rawIdent);
   const userRow = db
     .prepare('SELECT id, password_hash, status FROM users WHERE phone = ? OR lower(email) = ?')
     .get(normalized, rawIdent.toLowerCase()) as
@@ -448,7 +481,7 @@ v1Router.post('/auth/logout', (req: AuthedRequest, res) => {
       ip: req.ip,
     });
   }
-  res.clearCookie(SESSION_COOKIE_NAME, {path: '/'});
+  res.clearCookie(SESSION_COOKIE_NAME, clearCookieOptions(req, true));
   res.json({ok: true});
 });
 
@@ -462,7 +495,12 @@ v1Router.post('/auth/forgot-password', (req, res) => {
     return;
   }
 
-  const normalized = rawIdent.includes('@') ? rawIdent.toLowerCase() : normalizePhone(rawIdent);
+  const phoneIdent = normalizeLiberianPhone(rawIdent);
+  const normalized = rawIdent.includes('@')
+    ? rawIdent.toLowerCase()
+    : phoneIdent.valid
+      ? phoneIdent.normalized
+      : normalizePhone(rawIdent);
   const userRow = rawIdent
     ? (db
         .prepare('SELECT id FROM users WHERE phone = ? OR lower(email) = ?')

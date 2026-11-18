@@ -4,6 +4,7 @@ import {UserPlus} from 'lucide-react';
 import {apiFetch} from '../../lib/api';
 import {type ClientUser, useApp} from '../../context/AppContext';
 import {LANGUAGE_OPTIONS, type LanguageCode} from '../../lib/i18n';
+import {normalizeLiberianPhone} from '../../lib/phone';
 
 const LIBERIA_COUNTIES = [
   'Bomi', 'Bong', 'Gbarpolu', 'Grand Bassa', 'Grand Cape Mount',
@@ -35,13 +36,23 @@ export const RegisterPage: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    const phoneCheck = normalizeLiberianPhone(phone);
+    if (!phoneCheck.valid) {
+      setError(
+        phoneCheck.error ||
+          'Enter a valid Liberian phone number (e.g., 077 012 3456 or +231 77 012 3456).'
+      );
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await apiFetch<{user: ClientUser}>('/auth/register', {
         method: 'POST',
         body: JSON.stringify({
-          displayName,
-          phone,
+          displayName: displayName.trim(),
+          phone: phoneCheck.normalized,
           email: email.trim() || undefined,
           password,
           county,
@@ -106,9 +117,10 @@ export const RegisterPage: React.FC = () => {
                 required
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="+231770123456"
+                placeholder="0770123456 or +231770123456"
                 className="w-full min-h-[44px] rounded-xl border border-[#183B2B]/20 px-3.5 text-sm"
               />
+              <p className="text-xs text-[#183B2B]/65 mt-1">Liberian format: 077 012 3456 or +231 77 012 3456</p>
             </div>
             <div>
               <label htmlFor="reg-email" className="block text-sm font-semibold mb-1.5">

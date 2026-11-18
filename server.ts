@@ -17,10 +17,9 @@ export async function createApp() {
   const app = express();
   app.set('trust proxy', 1);
 
-  // Security headers
+  // Security headers (preserve iframe compatibility in preview environments)
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();
   });
@@ -31,7 +30,11 @@ export async function createApp() {
   );
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && allowedOrigins.has(origin)) {
+    const host = req.get('host');
+    const isSameHost =
+      Boolean(origin && host) &&
+      (origin === `https://${host}` || origin === `http://${host}`);
+    if (origin && (allowedOrigins.has(origin) || isSameHost)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');

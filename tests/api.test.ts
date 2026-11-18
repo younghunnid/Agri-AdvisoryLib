@@ -549,3 +549,157 @@ test('12. Marketplace listings support empty optional description and clearing d
   assert.equal(clearDesc.data.listing.description, '');
 });
 
+test('13. Farmer registration validates Liberian phone, rejects duplicates and invalid CSRF, and grants dashboard access on login', async () => {
+  // 1. Missing CSRF token on register returns 403 CSRF_INVALID
+  const noCsrfJar = new CookieJar();
+  const missingCsrf = await req(noCsrfJar, '/api/v1/auth/register', {
+    method: 'POST',
+    skipCsrf: true,
+    body: {
+      displayName: 'No CSRF Farmer',
+      phone: '0770333333',
+      password: 'SafePassword123',
+      county: 'Bong',
+    },
+  });
+  assert.equal(missingCsrf.status, 403);
+  assert.equal(missingCsrf.data.error.code, 'CSRF_INVALID');
+
+  // 2. Invalid/mismatched CSRF token returns 403 CSRF_INVALID
+  const badCsrfJar = new CookieJar();
+  await req(badCsrfJar, '/api/v1/csrf-token');
+  const badCsrfRes = await fetch(`${baseUrl}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: badCsrfJar.headerValue(),
+      'X-CSRF-Token': 'invalid-csrf-token-1234567890',
+    },
+    body: JSON.stringify({
+      displayName: 'Bad CSRF Farmer',
+      phone: '0770333333',
+      password: 'SafePassword123',
+      county: 'Bong',
+    }),
+  });
+  assert.equal(badCsrfRes.status, 403);
+  const badCsrfData = (await badCsrfRes.json()) as {error: {code: string}};
+  assert.equal(badCsrfData.error.code, 'CSRF_INVALID');
+
+  // 3. Invalid Liberian phone number rejected with 400
+  const regJar = new CookieJar();
+  const invalidPhone = await req(regJar, '/api/v1/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Invalid Phone Farmer',
+      phone: '+1-555-123-4567',
+      password: 'SafePassword123',
+      county: 'Bong',
+    },
+  });
+  assert.equal(invalidPhone.status, 400);
+  assert.equal(invalidPhone.data.error.code, 'VALIDATION_ERROR');
+
+  // 4. Successful farmer registration with local phone format & optional email omitted
+  const validReg = await req(regJar, '/api/v1/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Korpo Flomo',
+      phone: '0770333333',
+      password: 'SafePassword123',
+      county: 'Bong',
+      preferredLanguage: 'en',
+      cropsOfInterest: ['Cassava', 'Rice'],
+    },
+  });
+  assert.equal(validReg.status, 201);
+  assert.equal(validReg.data.user.phone, '+231770333333');
+  assert.equal(validReg.data.user.email, null);
+  assert.ok(validReg.data.user.roles.includes('farmer'));
+
+  // 5. Duplicate phone rejected even when formatted differently (+231 77 033 3333)
+  const dupJar = new CookieJar();
+  const dupReg = await req(dupJar, '/api/v1/auth/register', {
+    method: 'POST',
+    body: {
+      displayName: 'Duplicate Farmer',
+      phone: '+231 77 033 3333',
+      password: 'SafePassword123',
+      county: 'Bong',
+    },
+  });
+  assert.equal(dupReg.status, 409);
+  assert.equal(dupReg.data.error.code, 'PHONE_EXISTS');
+
+  // 6. Logout then log back in using the newly registered account (local format) & access Farmer Dashboard APIs
+  const logoutRes = await req(regJar, '/api/v1/auth/logout', {method: 'POST', body: {}});
+  assert.equal(logoutRes.status, 200);
+
+  const loginJar = new CookieJar();
+  const loginRes = await req(loginJar, '/api/v1/auth/login', {
+    method: 'POST',
+    body: {identifier: '077 033 3333', password: 'SafePassword123'},
+  });
+  assert.equal(loginRes.status, 200);
+  assert.equal(loginRes.data.user.displayName, 'Korpo Flomo');
+
+  const meRes = await req(loginJar, '/api/v1/auth/me');
+  assert.equal(meRes.status, 200);
+  assert.equal(meRes.data.user.phone, '+231770333333');
+
+  const savedRes = await req(loginJar, '/api/v1/farmer/saved');
+  assert.equal(savedRes.status, 200);
+  assert.ok(Array.isArray(savedRes.data.saved));
+
+  const questionsRes = await req(loginJar, '/api/v1/farmer/questions');
+  assert.equal(questionsRes.status, 200);
+  assert.ok(Array.isArray(questionsRes.data.questions));
+});
+
+test('14. HTTPS preview proxy headers issue single SameSite=None Secure Partitioned CSRF & session cookies', async () => {
+  const csrfRes = await fetch(`${baseUrl}/api/v1/csrf-token`, {
+    headers: {
+      'X-Forwarded-Proto': 'https',
+      Origin: 'https://ais-dev-ucahc4pwaqg7jovu43w7s4-1010835103112.europe-west2.run.app',
+    },
+  });
+  assert.equal(csrfRes.status, 200);
+
+  const setCookies = csrfRes.headers.getSetCookie ? csrfRes.headers.getSetCookie() : [];
+  const csrfCookies = setCookies.filter((c) => c.startsWith('agri_csrf='));
+  assert.equal(csrfCookies.length, 1, 'Should emit exactly one agri_csrf Set-Cookie header');
+  assert.match(csrfCookies[0], /SameSite=None/i);
+  assert.match(csrfCookies[0], /;\s*Secure/i);
+  assert.match(csrfCookies[0], /;\s*Partitioned/i);
+
+  const csrfData = (await csrfRes.json()) as {csrfToken: string};
+  const cookiePair = csrfCookies[0].split(';')[0];
+  assert.equal(cookiePair, `agri_csrf=${csrfData.csrfToken}`);
+
+  const regRes = await fetch(`${baseUrl}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Forwarded-Proto': 'https',
+      Origin: 'https://ais-dev-ucahc4pwaqg7jovu43w7s4-1010835103112.europe-west2.run.app',
+      Cookie: cookiePair,
+      'X-CSRF-Token': csrfData.csrfToken,
+    },
+    body: JSON.stringify({
+      displayName: 'Preview Farmer',
+      phone: '0770444444',
+      password: 'SafePassword123',
+      county: 'Lofa',
+      preferredLanguage: 'en',
+    }),
+  });
+  assert.equal(regRes.status, 201);
+  const regSetCookies = regRes.headers.getSetCookie ? regRes.headers.getSetCookie() : [];
+  const sessionCookie = regSetCookies.find((c) => c.startsWith('agri_session='));
+  assert.ok(sessionCookie, 'Registration should set agri_session cookie');
+  assert.match(sessionCookie, /SameSite=None/i);
+  assert.match(sessionCookie, /;\s*Secure/i);
+  assert.match(sessionCookie, /;\s*Partitioned/i);
+});
+
+
