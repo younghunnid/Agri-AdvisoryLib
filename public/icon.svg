@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Agri-Advisory Liberia emblem">
+  <rect width="512" height="512" rx="112" fill="#16803C" />
+  <circle cx="256" cy="256" r="172" fill="#183B2B" opacity="0.22" />
+  <path
+    d="M256 382V214M256 266C202 266 154 222 154 162C212 162 256 206 256 266ZM256 232C310 232 358 188 358 128C300 128 256 172 256 232Z"
+    fill="none"
+    stroke="#F3F8F0"
+    stroke-width="26"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="256" cy="140" r="24" fill="#F5B942" />
+</svg>
